@@ -95,28 +95,47 @@ app.post("/api/checkout/init", async (req, res) => {
     const merchant = process.env.COMGATE_MERCHANT;
     const secret = process.env.COMGATE_SECRET;
     const test = (process.env.COMGATE_TEST || "false") === "true";
-
-    // Это базовый домен ФРОНТА (твоя Webflow-страница)
     const baseUrl = process.env.PUBLIC_BASE_URL || "https://www.elorajewelry.cz";
 
     if (!merchant || !secret) {
-      return res.status(500).json({
-        message: "Set COMGATE_MERCHANT and COMGATE_SECRET in .env",
-      });
+      return res.status(500).json({ message: "Set COMGATE_MERCHANT and COMGATE_SECRET in .env" });
     }
 
-    const { fullName, email, phone, packeta } = req.body || {};
+    const {
+      fullName,
+      email,
+      phone,
+      shipping,
+      totalCzk,
+      amountCzk,
+      amount,
+      packeta,
+      address,
+    } = req.body || {};
 
     if (!fullName) return res.status(400).json({ message: "fullName required" });
-    if (!email && !phone)
-      return res.status(400).json({ message: "email or phone required" });
+    if (!email && !phone) return res.status(400).json({ message: "email or phone required" });
+    if (!shipping) return res.status(400).json({ message: "shipping required" });
 
-    if (!packeta?.pointId)
+    const isPickup = shipping === "cz_pickup" || shipping === "sk_pickup";
+    const isHome = shipping === "cz_home" || shipping === "sk_home";
+
+    if (isPickup && !packeta?.pointId) {
       return res.status(400).json({ message: "packeta.pointId required" });
+    }
 
-    // Пока тест: 100 CZK = 10000 haléřů
-    const price = 10000;
-    const curr = "CZK";
+    if (isHome) {
+      if (!address?.street || !address?.city || !address?.zip || !address?.country) {
+        return res.status(400).json({ message: "address required (street, city, zip, country)" });
+      }
+    }
+
+    const totalNum = Number(totalCzk ?? amountCzk ?? amount);
+    if (!Number.isFinite(totalNum) || totalNum <= 0) {
+      return res.status(400).json({ message: "totalCzk must be a positive number", got: totalCzk });
+    }
+
+    const price = Math.round(totalNum * 100); // haléře
     const refId = `elora-${Date.now()}`;
 
     const result = await comgateCreatePayment({
@@ -124,14 +143,14 @@ app.post("/api/checkout/init", async (req, res) => {
       secret,
       test,
       price,
-      curr,
+      curr: "CZK",
       label: "ELORA",
       refId,
       method: "ALL",
       email: email || "",
       phone: phone || "",
       fullName,
-      delivery: "PICKUP",
+      delivery: isPickup ? "PICKUP" : "DELIVERY",
       category: "PHYSICAL_GOODS_ONLY",
       lang: "cs",
     });
@@ -142,28 +161,29 @@ app.post("/api/checkout/init", async (req, res) => {
         comgate: result.data || null,
         raw: result.raw || null,
         httpStatus: result.httpStatus,
-        hint:
-          "Check allowed IP in Comgate portal (Povolené IP adresy) + correct merchant/secret + test mode.",
       });
     }
 
-    // redirect URL — то, что надо открыть пользователю
     return res.json({
       refId,
       transId: result.data.transId,
       redirectUrl: result.data.redirect,
-      // На будущее (успех/ошибка):
+      shipping,
+      totalCzk: totalNum,
+      priceHalers: price,
+      packeta: isPickup ? packeta : null,
+      address: isHome ? address : null,
       returnUrls: {
         paid: `${baseUrl}/payment-success?refId=${encodeURIComponent(refId)}`,
         cancelled: `${baseUrl}/payment-failed?refId=${encodeURIComponent(refId)}`,
         pending: `${baseUrl}/payment-failed?refId=${encodeURIComponent(refId)}`,
       },
-      packeta,
     });
   } catch (e) {
     return res.status(500).json({ message: e?.message || "Server error" });
   }
 });
+
 
 
 app.post("/api/comgate/notify", (req, res) => {
