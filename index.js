@@ -16,10 +16,7 @@ app.use(cors({ origin: "*" }));
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-/**
- * Comgate возвращает НЕ JSON, а urlencoded строку вида:
- * code=0&message=OK&transId=...&redirect=...
- */
+
 async function comgateCreatePayment({
   merchant,
   secret,
