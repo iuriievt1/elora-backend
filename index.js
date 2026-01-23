@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 
 dotenv.config();
 
@@ -23,61 +23,23 @@ const orders = new Map();
 // ✅ НУЖНОЕ: чтобы находить заказ по transId, если refId не пришёл
 const transIdToRefId = new Map();
 
-// ✅ НУЖНОЕ: SMTP отправка писем
-let cachedTransporter = null;
-
-function createTransport() {
-  if (cachedTransporter) return cachedTransporter;
-
-  const host = process.env.SMTP_HOST || "smtp.gmail.com";
-  const port = Number(process.env.SMTP_PORT || 587);
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-
-  if (!host || !user || !pass) return null;
-
-  // ✅ можно переопределить через ENV (иначе авто по порту)
-  const secure =
-    typeof process.env.SMTP_SECURE === "string"
-      ? process.env.SMTP_SECURE === "true"
-      : port === 465; // 465 = SSL, 587 = STARTTLS
-
-  cachedTransporter = nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: { user, pass },
-
-    // ✅ чтобы STARTTLS на 587 работал стабильно
-    requireTLS: !secure,
-    tls: { servername: host },
-
-    // ✅ таймауты (иначе будет висеть и падать "Connection timeout")
-    connectionTimeout: 15000,
-    greetingTimeout: 15000,
-    socketTimeout: 20000,
-  });
-
-  return cachedTransporter;
-}
+// ✅ НУЖНОЕ: отправка писем через RESEND (HTTPS) — без SMTP таймаутов на Render
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 async function sendMail({ to, subject, html }) {
-  const transporter = createTransport();
-  if (!transporter) {
-    console.log("[MAIL] SMTP env missing -> skip sending");
+  if (!resend) {
+    console.log("[MAIL] RESEND_API_KEY missing -> skip sending");
     return;
   }
 
-  // ✅ можно задать отдельный MAIL_FROM, иначе SMTP_USER
-  const from = process.env.MAIL_FROM || process.env.SMTP_USER;
+  // ✅ from можно переопределить через ENV
+  const from = process.env.MAIL_FROM || "onboarding@resend.dev";
 
   try {
-    await transporter.sendMail({ from, to, subject, html });
-    console.log(`[MAIL] sent -> ${to} | ${subject}`);
+    const r = await resend.emails.send({ from, to, subject, html });
+    console.log(`[MAIL] sent -> ${to} | ${subject} | id: ${r?.data?.id || "—"}`);
   } catch (e) {
     console.log("[MAIL] send error:", e?.message || e);
-    if (e?.code) console.log("[MAIL] code:", e.code);
-    if (e?.command) console.log("[MAIL] command:", e.command);
   }
 }
 
