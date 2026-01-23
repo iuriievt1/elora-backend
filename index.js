@@ -24,20 +24,36 @@ const orders = new Map();
 const transIdToRefId = new Map();
 
 // ✅ НУЖНОЕ: SMTP отправка писем
+let cachedTransporter = null;
+
 function createTransport() {
+  if (cachedTransporter) return cachedTransporter;
+
   const host = process.env.SMTP_HOST;
-  const port = Number(process.env.SMTP_PORT || 465);
+  const port = Number(process.env.SMTP_PORT || 587);
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
 
   if (!host || !user || !pass) return null;
 
-  return nodemailer.createTransport({
+  const secure = port === 465; // 465 = SSL, 587 = STARTTLS
+
+  cachedTransporter = nodemailer.createTransport({
     host,
     port,
-    secure: port === 465,
+    secure,
     auth: { user, pass },
+
+    // ✅ чтобы STARTTLS на 587 работал стабильно
+    requireTLS: !secure,
+
+    // ✅ таймауты (иначе будет висеть и падать "Connection timeout")
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
   });
+
+  return cachedTransporter;
 }
 
 async function sendMail({ to, subject, html }) {
@@ -46,8 +62,15 @@ async function sendMail({ to, subject, html }) {
     console.log("[MAIL] SMTP env missing -> skip sending");
     return;
   }
+
   const from = process.env.SMTP_USER; // info.elorajewelry@gmail.com
-  await transporter.sendMail({ from, to, subject, html });
+
+  try {
+    await transporter.sendMail({ from, to, subject, html });
+    console.log(`[MAIL] sent -> ${to} | ${subject}`);
+  } catch (e) {
+    console.log("[MAIL] send error:", e?.message || e);
+  }
 }
 
 function formatCzk(n) {
@@ -276,7 +299,6 @@ app.post("/api/checkout/init", async (req, res) => {
       });
     }
 
-    // ✅ НУЖНОЕ: сохраняем заказ до notify (чтобы потом отправить email с товарами)
     const transId = result.data.transId;
 
     orders.set(refId, {
@@ -294,7 +316,6 @@ app.post("/api/checkout/init", async (req, res) => {
       createdAt: new Date().toISOString(),
     });
 
-    // ✅ чтобы найти заказ по transId
     if (transId) transIdToRefId.set(String(transId), refId);
 
     return res.json({
@@ -317,15 +338,9 @@ app.post("/api/checkout/init", async (req, res) => {
   }
 });
 
-/**
- * ✅ FIX: отвечаем Comgate OK сразу (чтобы не было "E-shop nezpracoval informaci...")
- * а всю тяжелую работу (status + письма) делаем после.
- */
 app.post("/api/comgate/notify", (req, res) => {
-  // 1) МГНОВЕННО ответить Comgate
   res.status(200).send("OK");
 
-  // 2) Всё остальное — асинхронно
   setImmediate(async () => {
     try {
       console.log("COMGATE NOTIFY:", req.body);
@@ -337,7 +352,6 @@ app.post("/api/comgate/notify", (req, res) => {
       const refId = req.body?.refId ? String(req.body.refId) : "";
       const transId = req.body?.transId ? String(req.body.transId) : "";
 
-      // найти order
       let order = refId ? orders.get(refId) : null;
 
       if (!order && transId) {
@@ -348,7 +362,6 @@ app.post("/api/comgate/notify", (req, res) => {
       const useTransId = transId || order?.transId;
       if (!useTransId) return;
 
-      // проверить статус
       const statusRes = await comgateGetStatus({
         merchant,
         secret,
@@ -370,9 +383,8 @@ app.post("/api/comgate/notify", (req, res) => {
 
       order.paid = true;
 
-      const ownerEmail = process.env.OWNER_EMAIL || "danagrinenko@gmail.com";
+      const ownerEmail = process.env.OWNER_EMAIL || "info.elorajewelry@gmail.com";
 
-      // 1) письмо владельцу (все данные + доставка/пикап + товары + сумма)
       await sendMail({
         to: ownerEmail,
         subject: `ELORA: New PAID order (${order.refId})`,
@@ -400,14 +412,13 @@ app.post("/api/comgate/notify", (req, res) => {
         `,
       });
 
-      // 2) письмо клиенту (подтверждение заказа + товары + сумма + доставка/пикап)
       if (order.email) {
         await sendMail({
           to: order.email,
           subject: `ELORA: Order confirmed (${order.refId}) ✅`,
           html: `
             <h2>Děkujeme! Vaše platba proběhla úspěšně ✅</h2>
-            <p>Vaše objednávka byla přijata. Brzy vám přijde e-mail s dalším postupem.</p>
+            <p>Vaše objednávka byla přijata.</p>
 
             <p><b>Objednávka:</b> ${order.refId}</p>
             <p><b>Částka:</b> <b>${formatCzk(order.totalCzk)}</b></p>
