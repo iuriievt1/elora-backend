@@ -20,6 +20,9 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 // ✅ НУЖНОЕ: временное хранилище заказов (MVP)
 const orders = new Map();
 
+// ✅ НУЖНОЕ: чтобы находить заказ по transId, если refId не пришёл
+const transIdToRefId = new Map();
+
 // ✅ НУЖНОЕ: SMTP отправка писем
 function createTransport() {
   const host = process.env.SMTP_HOST;
@@ -47,18 +50,65 @@ async function sendMail({ to, subject, html }) {
   await transporter.sendMail({ from, to, subject, html });
 }
 
+function formatCzk(n) {
+  const num = Number(n || 0);
+  try {
+    return num.toLocaleString("cs-CZ", { style: "currency", currency: "CZK" });
+  } catch {
+    return `${num} CZK`;
+  }
+}
+
+function shippingToHuman(shipping) {
+  switch (shipping) {
+    case "cz_pickup": return "CZ — Z-Point/Z-Box (Pickup)";
+    case "cz_home":   return "CZ — Domů (Delivery)";
+    case "sk_pickup": return "SK — Z-Point/Z-Box (Pickup)";
+    case "sk_home":   return "SK — Domů (Delivery)";
+    default:          return shipping || "—";
+  }
+}
+
+function deliveryInfoHtml(order) {
+  if (order.packeta?.pointId) {
+    const name = order.packeta?.name || "";
+    const addr = order.packeta?.address || "";
+    return `
+      <h3>Pickup point (Zásilkovna)</h3>
+      <p><b>ID:</b> ${order.packeta.pointId}</p>
+      ${name ? `<p><b>Name:</b> ${name}</p>` : ""}
+      ${addr ? `<p><b>Address:</b> ${addr}</p>` : ""}
+    `;
+  }
+
+  if (order.address?.street) {
+    return `
+      <h3>Delivery address</h3>
+      <p>
+        ${order.address.street}<br/>
+        ${order.address.city} ${order.address.zip}<br/>
+        ${order.address.country}
+      </p>
+    `;
+  }
+
+  return `<h3>Delivery info</h3><p>—</p>`;
+}
+
 function itemsToHtml(items = []) {
   if (!Array.isArray(items) || items.length === 0) return "<i>Items not provided</i>";
+
   const rows = items
     .map((i) => {
       const name = i?.name || "Produkt";
       const variant = i?.variant ? ` (${i.variant})` : "";
       const qty = Number(i?.qty || 1);
       const line = Number(i?.lineTotalCzk || 0);
-      const price = line > 0 ? ` — ${line} CZK` : "";
-      return `<li>${name}${variant} — qty: ${qty}${price}</li>`;
+      const price = line > 0 ? ` — <b>${formatCzk(line)}</b>` : "";
+      return `<li>${name}${variant} — qty: <b>${qty}</b>${price}</li>`;
     })
     .join("");
+
   return `<ul>${rows}</ul>`;
 }
 
@@ -172,7 +222,7 @@ app.post("/api/checkout/init", async (req, res) => {
       amount,
       packeta,
       address,
-      items, // ✅ НУЖНОЕ
+      items,
     } = req.body || {};
 
     if (!fullName) return res.status(400).json({ message: "fullName required" });
@@ -227,9 +277,11 @@ app.post("/api/checkout/init", async (req, res) => {
     }
 
     // ✅ НУЖНОЕ: сохраняем заказ до notify (чтобы потом отправить email с товарами)
+    const transId = result.data.transId;
+
     orders.set(refId, {
       refId,
-      transId: result.data.transId,
+      transId,
       fullName,
       email: email || "",
       phone: phone || "",
@@ -242,9 +294,12 @@ app.post("/api/checkout/init", async (req, res) => {
       createdAt: new Date().toISOString(),
     });
 
+    // ✅ чтобы найти заказ по transId
+    if (transId) transIdToRefId.set(String(transId), refId);
+
     return res.json({
       refId,
-      transId: result.data.transId,
+      transId,
       redirectUrl: result.data.redirect,
       shipping,
       totalCzk: totalNum,
@@ -262,87 +317,115 @@ app.post("/api/checkout/init", async (req, res) => {
   }
 });
 
-app.post("/api/comgate/notify", async (req, res) => {
-  try {
-    console.log("COMGATE NOTIFY:", req.body);
+/**
+ * ✅ FIX: отвечаем Comgate OK сразу (чтобы не было "E-shop nezpracoval informaci...")
+ * а всю тяжелую работу (status + письма) делаем после.
+ */
+app.post("/api/comgate/notify", (req, res) => {
+  // 1) МГНОВЕННО ответить Comgate
+  res.status(200).send("OK");
 
-    const merchant = process.env.COMGATE_MERCHANT;
-    const secret = process.env.COMGATE_SECRET;
-    const test = (process.env.COMGATE_TEST || "false") === "true";
+  // 2) Всё остальное — асинхронно
+  setImmediate(async () => {
+    try {
+      console.log("COMGATE NOTIFY:", req.body);
 
-    const refId = req.body?.refId;
-    const transId = req.body?.transId;
+      const merchant = process.env.COMGATE_MERCHANT;
+      const secret = process.env.COMGATE_SECRET;
+      const test = (process.env.COMGATE_TEST || "false") === "true";
 
-    const order = refId ? orders.get(refId) : null;
-    const useTransId = transId || order?.transId;
+      const refId = req.body?.refId ? String(req.body.refId) : "";
+      const transId = req.body?.transId ? String(req.body.transId) : "";
 
-    if (!useTransId) return res.status(200).send("OK");
+      // найти order
+      let order = refId ? orders.get(refId) : null;
 
-    // ✅ НУЖНОЕ: проверяем статус у Comgate
-    const statusRes = await comgateGetStatus({
-      merchant,
-      secret,
-      test,
-      transId: useTransId,
-    });
+      if (!order && transId) {
+        const mappedRef = transIdToRefId.get(transId);
+        if (mappedRef) order = orders.get(mappedRef) || null;
+      }
 
-    console.log("COMGATE STATUS:", statusRes.data);
+      const useTransId = transId || order?.transId;
+      if (!useTransId) return;
 
-    const status = String(statusRes.data?.status || "").toUpperCase();
+      // проверить статус
+      const statusRes = await comgateGetStatus({
+        merchant,
+        secret,
+        test,
+        transId: useTransId,
+      });
 
-    // ✅ НУЖНОЕ: считаем оплату прошедшей
-    const isPaid = status === "PAID" || status === "AUTHORIZED";
+      console.log("COMGATE STATUS:", statusRes.data);
 
-    if (isPaid && order && !order.paid) {
+      const status = String(statusRes.data?.status || "").toUpperCase();
+      const isPaid = status === "PAID" || status === "AUTHORIZED";
+
+      if (!isPaid) return;
+      if (!order) {
+        console.log("[WARN] Paid, but order not found. refId:", refId, "transId:", transId);
+        return;
+      }
+      if (order.paid) return;
+
       order.paid = true;
 
       const ownerEmail = process.env.OWNER_EMAIL || "danagrinenko@gmail.com";
 
-      // 1) письмо владельцу
+      // 1) письмо владельцу (все данные + доставка/пикап + товары + сумма)
       await sendMail({
         to: ownerEmail,
         subject: `ELORA: New PAID order (${order.refId})`,
         html: `
           <h2>New order — PAID ✅</h2>
-          <p><b>Ref:</b> ${order.refId}</p>
+          <p><b>Order Ref:</b> ${order.refId}</p>
+          <p><b>Comgate transId:</b> ${order.transId || "—"}</p>
+
+          <h3>Customer</h3>
           <p><b>Name:</b> ${order.fullName}</p>
-          <p><b>Email:</b> ${order.email}</p>
-          <p><b>Phone:</b> ${order.phone}</p>
-          <p><b>Shipping:</b> ${order.shipping}</p>
-          <p><b>Total:</b> ${order.totalCzk} CZK</p>
+          <p><b>Email:</b> ${order.email || "—"}</p>
+          <p><b>Phone:</b> ${order.phone || "—"}</p>
+
+          <h3>Shipping</h3>
+          <p><b>Method:</b> ${shippingToHuman(order.shipping)}</p>
+          ${deliveryInfoHtml(order)}
+
           <h3>Items</h3>
           ${itemsToHtml(order.items)}
-          <h3>Address</h3>
-          <pre>${order.address ? JSON.stringify(order.address, null, 2) : "—"}</pre>
-          <h3>Packeta</h3>
-          <pre>${order.packeta ? JSON.stringify(order.packeta, null, 2) : "—"}</pre>
+
+          <h3>Total</h3>
+          <p><b>${formatCzk(order.totalCzk)}</b></p>
+
+          <p style="opacity:.7;font-size:12px;">Created: ${order.createdAt}</p>
         `,
       });
 
-      // 2) письмо клиенту
+      // 2) письмо клиенту (подтверждение заказа + товары + сумма + доставка/пикап)
       if (order.email) {
         await sendMail({
           to: order.email,
           subject: `ELORA: Order confirmed (${order.refId}) ✅`,
           html: `
-            <h2>Thank you! Your order is confirmed ✅</h2>
-            <p><b>Order:</b> ${order.refId}</p>
-            <p><b>Status:</b> PAID</p>
-            <p><b>Total:</b> ${order.totalCzk} CZK</p>
-            <h3>Items</h3>
+            <h2>Děkujeme! Vaše platba proběhla úspěšně ✅</h2>
+            <p>Vaše objednávka byla přijata. Brzy vám přijde e-mail s dalším postupem.</p>
+
+            <p><b>Objednávka:</b> ${order.refId}</p>
+            <p><b>Částka:</b> <b>${formatCzk(order.totalCzk)}</b></p>
+            <p><b>Doprava:</b> ${shippingToHuman(order.shipping)}</p>
+
+            ${deliveryInfoHtml(order)}
+
+            <h3>Položky</h3>
             ${itemsToHtml(order.items)}
-            <p>We will process your order and send it as soon as possible.</p>
+
+            <p>Děkujeme za nákup.<br/>ELORA</p>
           `,
         });
       }
+    } catch (e) {
+      console.log("NOTIFY ASYNC ERROR:", e?.message || e);
     }
-
-    return res.status(200).send("OK");
-  } catch (e) {
-    console.log("NOTIFY ERROR:", e?.message || e);
-    // Comgate лучше всегда отвечать OK
-    return res.status(200).send("OK");
-  }
+  });
 });
 
 const port = process.env.PORT || 3000;
