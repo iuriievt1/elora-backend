@@ -29,14 +29,18 @@ let cachedTransporter = null;
 function createTransport() {
   if (cachedTransporter) return cachedTransporter;
 
-  const host = process.env.SMTP_HOST;
+  const host = process.env.SMTP_HOST || "smtp.gmail.com";
   const port = Number(process.env.SMTP_PORT || 587);
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
 
   if (!host || !user || !pass) return null;
 
-  const secure = port === 465; // 465 = SSL, 587 = STARTTLS
+  // ✅ можно переопределить через ENV (иначе авто по порту)
+  const secure =
+    typeof process.env.SMTP_SECURE === "string"
+      ? process.env.SMTP_SECURE === "true"
+      : port === 465; // 465 = SSL, 587 = STARTTLS
 
   cachedTransporter = nodemailer.createTransport({
     host,
@@ -46,6 +50,7 @@ function createTransport() {
 
     // ✅ чтобы STARTTLS на 587 работал стабильно
     requireTLS: !secure,
+    tls: { servername: host },
 
     // ✅ таймауты (иначе будет висеть и падать "Connection timeout")
     connectionTimeout: 15000,
@@ -63,13 +68,16 @@ async function sendMail({ to, subject, html }) {
     return;
   }
 
-  const from = process.env.SMTP_USER; // info.elorajewelry@gmail.com
+  // ✅ можно задать отдельный MAIL_FROM, иначе SMTP_USER
+  const from = process.env.MAIL_FROM || process.env.SMTP_USER;
 
   try {
     await transporter.sendMail({ from, to, subject, html });
     console.log(`[MAIL] sent -> ${to} | ${subject}`);
   } catch (e) {
     console.log("[MAIL] send error:", e?.message || e);
+    if (e?.code) console.log("[MAIL] code:", e.code);
+    if (e?.command) console.log("[MAIL] command:", e.command);
   }
 }
 
