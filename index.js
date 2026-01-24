@@ -23,8 +23,9 @@ const orders = new Map();
 // ✅ НУЖНОЕ: чтобы находить заказ по transId, если refId не пришёл
 const transIdToRefId = new Map();
 
-// ✅ НУЖНОЕ: отправка писем через RESEND (HTTPS) — без SMTP таймаутов на Render
-const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+// ✅ НУЖНОЕ: Resend отправка писем
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
 async function sendMail({ to, subject, html }) {
   if (!resend) {
@@ -32,12 +33,23 @@ async function sendMail({ to, subject, html }) {
     return;
   }
 
-  // ✅ from можно переопределить через ENV
-  const from = process.env.MAIL_FROM || "onboarding@resend.dev";
+  const from = process.env.MAIL_FROM || "orders@elorajewelry.cz";
 
   try {
-    const r = await resend.emails.send({ from, to, subject, html });
-    console.log(`[MAIL] sent -> ${to} | ${subject} | id: ${r?.data?.id || "—"}`);
+    const resp = await resend.emails.send({
+      from,
+      to: Array.isArray(to) ? to : [to],
+      subject,
+      html,
+    });
+
+    // resp обычно содержит id или error
+    if (resp?.error) {
+      console.log("[MAIL] resend error:", resp.error);
+      return;
+    }
+
+    console.log(`[MAIL] sent -> ${Array.isArray(to) ? to.join(",") : to} | ${subject} | id: ${resp?.data?.id || resp?.id || "-"}`);
   } catch (e) {
     console.log("[MAIL] send error:", e?.message || e);
   }
