@@ -393,7 +393,7 @@ app.post("/api/checkout/init", async (req, res) => {
       transId,
       fullName,
       email: email || "",
-      phone: (phone || "").trim(), // ✅ сохраняем телефон
+      phone: (phone || "").trim(),
       shipping,
       totalCzk: totalNum,
       packeta: isPickup ? packeta : null,
@@ -497,7 +497,7 @@ app.post("/api/comgate/notify", (req, res) => {
               html: `
                 ${row("Name", order.fullName)}
                 ${row("Email", order.email || "—")}
-                ${row("Telefon", order.phone || "—")} // ✅ добавили
+                ${row("Telefon", order.phone || "—")}
               `,
             })}
 
