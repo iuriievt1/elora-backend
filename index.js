@@ -328,7 +328,7 @@ app.post("/api/checkout/init", async (req, res) => {
       return res.status(500).json({ message: "Set COMGATE_MERCHANT and COMGATE_SECRET in .env" });
     }
 
-    const { fullName, email, shipping, totalCzk, amountCzk, amount, packeta, address, items } =
+    const { fullName, email, phone, shipping, totalCzk, amountCzk, amount, packeta, address, items } =
       req.body || {};
 
     if (!fullName) return res.status(400).json({ message: "fullName required" });
@@ -393,6 +393,7 @@ app.post("/api/checkout/init", async (req, res) => {
       transId,
       fullName,
       email: email || "",
+      phone: (phone || "").trim(), // ✅ сохраняем телефон
       shipping,
       totalCzk: totalNum,
       packeta: isPickup ? packeta : null,
@@ -496,6 +497,7 @@ app.post("/api/comgate/notify", (req, res) => {
               html: `
                 ${row("Name", order.fullName)}
                 ${row("Email", order.email || "—")}
+                ${row("Telefon", order.phone || "—")} // ✅ добавили
               `,
             })}
 
@@ -530,6 +532,7 @@ app.post("/api/comgate/notify", (req, res) => {
                   ${row("Objednávka", order.refId)}
                   ${row("Částka", formatCzk(order.totalCzk))}
                   ${row("Doprava", shippingToHuman(order.shipping))}
+                  ${row("Telefon", order.phone || "—")}
                 `,
               })}
 
